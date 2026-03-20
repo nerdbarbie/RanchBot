@@ -3,13 +3,15 @@ BB TR Support — Red-bot cog
 Bridges Discord to the Trading Ranch WordPress support ticket system.
 
 Users type in the support channel; their message is deleted and a **private
-thread** is created automatically.  All members with the configured staff
-role are explicitly added to the thread so they can see it.  Web-originated
-tickets also get a Discord thread created automatically.
+thread** is created automatically.  A notification with **Claim**, **Close**,
+and **Resolved** buttons is posted in the staff notification channel.
+Staff click Claim to be added to the thread.  Web-originated tickets also
+get a Discord thread and staff notification automatically.
 
 Commands:
   !support                                  — points users to the support channel
   !trsupport setchannel #channel            — set support channel              (admin)
+  !trsupport setnotifychannel #channel      — set staff notification channel   (admin)
   !trsupport setstaffrole @role             — set support staff role           (admin)
   !trsupport setsecret <key>                — set WordPress API secret         (admin)
   !trsupport seturl <url>                   — set WordPress site URL           (admin)
@@ -62,6 +64,219 @@ STATUS_COLORS = {
 SYNC_INTERVAL = 60  # seconds between WP → Discord reply sync checks
 
 
+# ── Persistent ticket notification view ──────────────────────────────────────
+
+
+class TicketView(discord.ui.View):
+    """Persistent Claim / Close / Resolved buttons on ticket notifications.
+
+    ``custom_id`` encodes the ticket and thread so the view survives bot
+    restarts.  Multiple staff can click **Claim** — each is added to the
+    thread and the embed records who has claimed it.
+    """
+
+    def __init__(self, cog: "BBTRSupport" = None):
+        super().__init__(timeout=None)
+        self.cog = cog
+
+    # ── helper: resolve cog at interaction time (persistent views) ────────
+    def _get_cog(self, interaction: discord.Interaction) -> "BBTRSupport":
+        if self.cog:
+            return self.cog
+        return interaction.client.get_cog("BBTRSupport")
+
+    async def _update_notification(
+        self,
+        interaction: discord.Interaction,
+        ticket_id: int,
+        thread_id: int,
+        *,
+        new_status: str | None = None,
+        claimer: discord.Member | None = None,
+    ):
+        """Re-build the notification embed and edit the original message."""
+        cog = self._get_cog(interaction)
+        if not cog:
+            return
+
+        msg = interaction.message
+        old_embed = msg.embeds[0] if msg.embeds else None
+        if not old_embed:
+            return
+
+        # Rebuild embed preserving existing fields.
+        embed = discord.Embed(
+            title=old_embed.title,
+            color=STATUS_COLORS.get(new_status, old_embed.color.value if old_embed.color else 0x2563EB),
+            description=old_embed.description or "",
+        )
+
+        # Copy existing fields, updating Status and Claimed By as needed.
+        claimed_field_value = None
+        for field in old_embed.fields:
+            if field.name == "Status" and new_status:
+                embed.add_field(name="Status", value=new_status.capitalize(), inline=field.inline)
+            elif field.name == "Claimed By":
+                # Append new claimer.
+                existing = field.value or ""
+                if claimer and claimer.mention not in existing:
+                    claimed_field_value = f"{existing}, {claimer.mention}" if existing else claimer.mention
+                else:
+                    claimed_field_value = existing
+                embed.add_field(name="Claimed By", value=claimed_field_value, inline=field.inline)
+            else:
+                embed.add_field(name=field.name, value=field.value, inline=field.inline)
+
+        # If claimer provided but no Claimed By field existed yet, add it.
+        if claimer and claimed_field_value is None:
+            embed.add_field(name="Claimed By", value=claimer.mention, inline=True)
+
+        if old_embed.footer:
+            embed.set_footer(text=old_embed.footer.text)
+
+        # Disable buttons if ticket is now closed/resolved.
+        view = self if new_status not in ("closed", "resolved") else None
+        try:
+            await interaction.message.edit(embed=embed, view=view)
+        except (discord.Forbidden, discord.HTTPException):
+            pass
+
+    # ── Claim button ─────────────────────────────────────────────────────
+    @discord.ui.button(
+        label="Claim",
+        style=discord.ButtonStyle.success,
+        custom_id="trs:claim",
+        emoji="🙋",
+    )
+    async def btn_claim(self, interaction: discord.Interaction, button: discord.ui.Button):
+        cog = self._get_cog(interaction)
+        if not cog:
+            await interaction.response.send_message("❌ Cog not loaded.", ephemeral=True)
+            return
+
+        # Permission check.
+        if not await cog._is_staff(interaction.user):
+            await interaction.response.send_message("❌ Only support staff can claim tickets.", ephemeral=True)
+            return
+
+        # Extract ticket_id and thread_id from the embed.
+        ticket_id, thread_id = self._ids_from_embed(interaction.message)
+        if not ticket_id:
+            await interaction.response.send_message("❌ Could not determine ticket info.", ephemeral=True)
+            return
+
+        await interaction.response.defer(ephemeral=True)
+
+        # Add the staff member to the private thread.
+        thread = interaction.guild.get_channel_or_thread(thread_id) if thread_id else None
+        if not thread:
+            # Try fetching if not cached.
+            try:
+                thread = await interaction.guild.fetch_channel(thread_id)
+            except Exception:
+                thread = None
+        if thread and isinstance(thread, discord.Thread):
+            try:
+                await thread.add_user(interaction.user)
+            except discord.HTTPException:
+                pass
+
+        # Assign on WordPress.
+        wp_info = await cog._wp_user_for(str(interaction.user.id))
+        if wp_info["user_id"]:
+            await cog._patch(f"/tickets/{ticket_id}", {"assigned_to": wp_info["user_id"]})
+
+        await self._update_notification(interaction, ticket_id, thread_id, claimer=interaction.user)
+        thread_mention = f"<#{thread_id}>" if thread_id else "the ticket thread"
+        await interaction.followup.send(
+            f"✅ You've claimed ticket #{ticket_id}. Head to {thread_mention}.",
+            ephemeral=True,
+        )
+
+    # ── Close button ─────────────────────────────────────────────────────
+    @discord.ui.button(
+        label="Close",
+        style=discord.ButtonStyle.danger,
+        custom_id="trs:close",
+        emoji="🔒",
+    )
+    async def btn_close(self, interaction: discord.Interaction, button: discord.ui.Button):
+        cog = self._get_cog(interaction)
+        if not cog:
+            await interaction.response.send_message("❌ Cog not loaded.", ephemeral=True)
+            return
+        if not await cog._is_staff(interaction.user):
+            await interaction.response.send_message("❌ Only support staff can close tickets.", ephemeral=True)
+            return
+
+        ticket_id, thread_id = self._ids_from_embed(interaction.message)
+        if not ticket_id:
+            await interaction.response.send_message("❌ Could not determine ticket info.", ephemeral=True)
+            return
+
+        await interaction.response.defer(ephemeral=True)
+
+        result, code = await cog._patch(f"/tickets/{ticket_id}", {"status": "closed"})
+        if code == 200:
+            await cog._archive_thread_for_ticket(ticket_id)
+            await self._update_notification(interaction, ticket_id, thread_id, new_status="closed")
+            await interaction.followup.send(f"✅ Ticket #{ticket_id} closed.", ephemeral=True)
+        else:
+            await interaction.followup.send(f"❌ Failed to close ticket #{ticket_id}.", ephemeral=True)
+
+    # ── Resolved button ──────────────────────────────────────────────────
+    @discord.ui.button(
+        label="Resolved",
+        style=discord.ButtonStyle.secondary,
+        custom_id="trs:resolved",
+        emoji="✅",
+    )
+    async def btn_resolved(self, interaction: discord.Interaction, button: discord.ui.Button):
+        cog = self._get_cog(interaction)
+        if not cog:
+            await interaction.response.send_message("❌ Cog not loaded.", ephemeral=True)
+            return
+        if not await cog._is_staff(interaction.user):
+            await interaction.response.send_message("❌ Only support staff can resolve tickets.", ephemeral=True)
+            return
+
+        ticket_id, thread_id = self._ids_from_embed(interaction.message)
+        if not ticket_id:
+            await interaction.response.send_message("❌ Could not determine ticket info.", ephemeral=True)
+            return
+
+        await interaction.response.defer(ephemeral=True)
+
+        result, code = await cog._patch(f"/tickets/{ticket_id}", {"status": "resolved"})
+        if code == 200:
+            await cog._archive_thread_for_ticket(ticket_id)
+            await self._update_notification(interaction, ticket_id, thread_id, new_status="resolved")
+            await interaction.followup.send(f"✅ Ticket #{ticket_id} resolved.", ephemeral=True)
+        else:
+            await interaction.followup.send(f"❌ Failed to resolve ticket #{ticket_id}.", ephemeral=True)
+
+    # ── helpers ──────────────────────────────────────────────────────────
+    @staticmethod
+    def _ids_from_embed(message: discord.Message) -> tuple:
+        """Extract (ticket_id, thread_id) from the notification embed."""
+        if not message.embeds:
+            return None, None
+        embed = message.embeds[0]
+        title = embed.title or ""
+        # Title format: "🎫 Ticket #123 — Author" or "🌐 Web Ticket #123 — Author"
+        m = re.search(r"#(\d+)", title)
+        ticket_id = int(m.group(1)) if m else None
+        # Thread link is stored in a field named "Thread".
+        thread_id = None
+        for field in embed.fields:
+            if field.name == "Thread":
+                ch_match = re.search(r"<#(\d+)>", field.value or "")
+                if ch_match:
+                    thread_id = int(ch_match.group(1))
+                break
+        return ticket_id, thread_id
+
+
 class BBTRSupport(commands.Cog):
     """Trading Ranch WordPress support ticket bridge."""
 
@@ -106,6 +321,8 @@ class BBTRSupport(commands.Cog):
     async def cog_load(self):
         self.session = aiohttp.ClientSession()
         self._sync_task = asyncio.create_task(self._sync_loop())
+        # Register the persistent button view so it works after restarts.
+        self.bot.add_view(TicketView(cog=self))
 
     async def cog_unload(self):
         if self._sync_task:
@@ -329,6 +546,56 @@ class BBTRSupport(commands.Cog):
                         log.warning("Could not archive thread %s for ticket %s", tid_str, ticket_id)
                 break
 
+    async def _post_ticket_notification(
+        self,
+        ticket: dict,
+        thread: discord.Thread,
+        *,
+        source_label: str = "🎫 Ticket",
+        submitter: str = "",
+        guild: discord.Guild = None,
+    ):
+        """Post a notification embed with Claim/Close/Resolved buttons to the
+        configured notify channel.  Staff click Claim to join the thread."""
+        notify_channel_id = await self.config.notify_channel_id()
+        if not notify_channel_id:
+            return
+        g = guild or (thread.guild if thread else None)
+        if not g:
+            return
+        channel = g.get_channel(notify_channel_id)
+        if not channel:
+            return
+
+        ticket_id = ticket.get("id", "?")
+        status    = ticket.get("status", "open")
+        title     = ticket.get("title", "(no title)")
+
+        embed = discord.Embed(
+            title=f"{source_label} #{ticket_id} — {title}",
+            color=STATUS_COLORS.get(status, 0x2563EB),
+        )
+        embed.add_field(name="Status", value=status.capitalize(), inline=True)
+        embed.add_field(name="Topic",  value=ticket.get("topic", "—").replace("_", " ").title(), inline=True)
+        if submitter:
+            embed.add_field(name="From", value=submitter, inline=True)
+        embed.add_field(name="Thread", value=f"<#{thread.id}>", inline=True)
+        embed.set_footer(text="Click Claim to join this ticket's thread")
+
+        # Ping the staff role so they notice the notification.
+        staff_role_id = await self.config.staff_role_id()
+        staff_ping = f"<@&{staff_role_id}>" if staff_role_id else ""
+
+        try:
+            await channel.send(
+                content=staff_ping,
+                embed=embed,
+                view=TicketView(cog=self),
+                allowed_mentions=discord.AllowedMentions(roles=True),
+            )
+        except (discord.Forbidden, discord.HTTPException) as exc:
+            log.warning("Could not post ticket notification: %s", exc)
+
     async def _create_thread_for_web_ticket(
         self, ticket: dict, support_channel: discord.TextChannel
     ):
@@ -387,8 +654,13 @@ class BBTRSupport(commands.Cog):
         if first_msg:
             await thread.send(f"**{submitter}** (via website):\n\n{first_msg}")
 
-        # Add staff to the thread.
-        await self._invite_staff_to_thread(thread)
+        # Post notification with Claim/Close/Resolved buttons.
+        await self._post_ticket_notification(
+            ticket, thread,
+            source_label="\U0001f310 Web Ticket",
+            submitter=submitter,
+            guild=support_channel.guild,
+        )
 
         # If the web user has a linked Discord account, invite them too.
         discord_user_id = ticket.get("discord_user_id")
@@ -564,8 +836,13 @@ class BBTRSupport(commands.Cog):
                 f"will be with you shortly."
             )
 
-            # Add all staff-role members to the private thread.
-            await self._invite_staff_to_thread(thread)
+            # Post notification with Claim/Close/Resolved buttons.
+            await self._post_ticket_notification(
+                ticket, thread,
+                source_label="🆕 New Ticket",
+                submitter=f"{author.mention} ({author})",
+                guild=message.guild,
+            )
 
             # Topic selection via emoji reactions.
             topic_msg = await thread.send(self._topic_reaction_menu())
@@ -878,6 +1155,7 @@ class BBTRSupport(commands.Cog):
             name="📋 Setup (Admin)",
             value=(
                 "`[p]trs setchannel #channel` — where users submit tickets\n"
+                "`[p]trs setnotifychannel #channel` — staff notification channel\n"
                 "`[p]trs setstaffrole @role` — support staff role\n"
                 "`[p]trs setsecret <key>` — WordPress API secret\n"
                 "`[p]trs seturl <url>` — WordPress site URL\n"
@@ -947,6 +1225,17 @@ class BBTRSupport(commands.Cog):
         Staff can update ticket statuses and post internal notes in threads."""
         await self.config.staff_role_id.set(role.id)
         await ctx.send(f"✅ Staff role set to **{role.name}**.")
+
+    @trsupport.command(name="setnotifychannel")
+    @commands.admin_or_permissions(manage_guild=True)
+    async def trs_setnotifychannel(self, ctx: commands.Context, channel: discord.TextChannel):
+        """Set the channel where ticket notifications with Claim/Close buttons appear.
+        Staff click Claim to join a ticket thread. This should be a staff-only channel."""
+        await self.config.notify_channel_id.set(channel.id)
+        await ctx.send(
+            f"✅ Notification channel set to {channel.mention}.\n"
+            f"New tickets will post here with **Claim**, **Close**, and **Resolved** buttons."
+        )
 
     # ── Default instructions text (source of truth) ──────────────────────────
 
@@ -1212,20 +1501,23 @@ class BBTRSupport(commands.Cog):
     @commands.admin_or_permissions(manage_guild=True)
     async def trs_settings(self, ctx: commands.Context):
         """Show current configuration (secret is hidden)."""
-        wp_url        = await self.config.wp_url()
-        api_secret    = await self.config.api_secret()
-        channel_id    = await self.config.channel_id()
-        staff_role_id = await self.config.staff_role_id()
+        wp_url            = await self.config.wp_url()
+        api_secret        = await self.config.api_secret()
+        channel_id        = await self.config.channel_id()
+        staff_role_id     = await self.config.staff_role_id()
+        notify_channel_id = await self.config.notify_channel_id()
 
-        channel    = ctx.guild.get_channel(channel_id) if channel_id and ctx.guild else None
-        staff_role = ctx.guild.get_role(staff_role_id) if staff_role_id and ctx.guild else None
-        threads    = await self.config.ticket_threads()
+        channel        = ctx.guild.get_channel(channel_id) if channel_id and ctx.guild else None
+        notify_channel = ctx.guild.get_channel(notify_channel_id) if notify_channel_id and ctx.guild else None
+        staff_role     = ctx.guild.get_role(staff_role_id) if staff_role_id and ctx.guild else None
+        threads        = await self.config.ticket_threads()
 
         embed = discord.Embed(title="BB TR Support — Settings", color=0x1a0a2e)
-        embed.add_field(name="WordPress URL",    value=f"`{wp_url}`",                                      inline=False)
-        embed.add_field(name="API Secret",       value="✅ Set" if api_secret else "❌ Not set",           inline=True)
-        embed.add_field(name="Ticket Channel",   value=channel.mention if channel else "❌ Not set",       inline=True)
-        embed.add_field(name="Staff Role",       value=staff_role.mention if staff_role else "❌ Not set", inline=True)
-        embed.add_field(name="Active Threads",   value=str(len(threads)),                                  inline=True)
-        embed.add_field(name="WP Sync",          value=f"Every {SYNC_INTERVAL}s",                          inline=True)
+        embed.add_field(name="WordPress URL",      value=f"`{wp_url}`",                                            inline=False)
+        embed.add_field(name="API Secret",         value="✅ Set" if api_secret else "❌ Not set",                 inline=True)
+        embed.add_field(name="Ticket Channel",     value=channel.mention if channel else "❌ Not set",             inline=True)
+        embed.add_field(name="Notify Channel",     value=notify_channel.mention if notify_channel else "❌ Not set", inline=True)
+        embed.add_field(name="Staff Role",         value=staff_role.mention if staff_role else "❌ Not set",       inline=True)
+        embed.add_field(name="Active Threads",     value=str(len(threads)),                                        inline=True)
+        embed.add_field(name="WP Sync",            value=f"Every {SYNC_INTERVAL}s",                                inline=True)
         await ctx.send(embed=embed)
