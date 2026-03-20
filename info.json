@@ -1,0 +1,7 @@
+{
+    "author": ["Trading Ranch"],
+    "description": "Trading Ranch cogs for Red-DiscordBot",
+    "short": "Trading Ranch cogs for Red-DiscordBot",
+    "install_msg": "Thank you for installing Trading Ranch cogs!",
+    "index_name": "RanchBot"
+}
