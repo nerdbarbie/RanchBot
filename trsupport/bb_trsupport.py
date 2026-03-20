@@ -369,19 +369,11 @@ class BBTRSupport(commands.Cog):
             await thread.send(embed=embed)
             await thread.send(f"**{author.display_name}:**\n\n{content}")
 
-            # Ask for topic via reactions (avoids relaying the selection to WP).
-            topic_prompt = await thread.send(
+            # Welcome message — topic is fixed to "general".
+            await thread.send(
                 f"Thanks for reaching out, {author.mention}! A support team member "
-                f"will be with you shortly.\n\n"
-                f"**React below to select a topic:**\n"
-                f"{self._topic_reaction_menu()}\n\n"
-                f"_Or just continue chatting — we'll keep it as **General**._"
+                f"will be with you shortly."
             )
-            for emoji in self._TOPIC_EMOJIS[: len(TOPICS)]:
-                try:
-                    await topic_prompt.add_reaction(emoji)
-                except discord.HTTPException:
-                    pass
 
             # Notify the staff role inside the thread.
             staff_role_id = await self.config.staff_role_id()
@@ -397,25 +389,6 @@ class BBTRSupport(commands.Cog):
                 )
             except discord.HTTPException:
                 pass
-
-            # Wait for topic reaction (non-blocking, short timeout).
-            def is_topic_reaction(reaction, user):
-                return (
-                    user.id == author.id
-                    and reaction.message.id == topic_prompt.id
-                    and str(reaction.emoji) in self._TOPIC_EMOJIS[: len(TOPICS)]
-                )
-
-            try:
-                reaction, _ = await self.bot.wait_for(
-                    "reaction_add", check=is_topic_reaction, timeout=120.0,
-                )
-                idx = self._TOPIC_EMOJIS.index(str(reaction.emoji))
-                topic_key, topic_label = TOPICS[idx]
-                await self._patch(f"/tickets/{ticket_id}", {"topic": topic_key})
-                await thread.send(f"✅ Topic set to **{topic_label}**.")
-            except (asyncio.TimeoutError, ValueError):
-                pass  # Keep default "general"
 
         finally:
             self._creating_ticket.discard(author.id)
