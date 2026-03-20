@@ -713,45 +713,49 @@ class BBTRSupport(commands.Cog):
     @commands.guild_only()
     async def trsupport(self, ctx: commands.Context):
         """Trading Ranch Support Help Menu"""
-        if ctx.invoked_subcommand is None:
-            embed = discord.Embed(
-                title="🎫 Trading Ranch Support Help Menu",
-                color=0x1a0a2e,
-            )
-            embed.add_field(
-                name="📋 Setup (Admin)",
-                value=(
-                    "`[p]trs setchannel #channel` — where users submit tickets\n"
-                    "`[p]trs setnotifychannel #channel` — staff alerts for web tickets\n"
-                    "`[p]trs setstaffrole @role` — support staff role\n"
-                    "`[p]trs setsecret <key>` — WordPress API secret\n"
-                    "`[p]trs seturl <url>` — WordPress site URL\n"
-                    "`[p]trs settitle <text>` — change instructions embed title\n"
-                    "`[p]trs instructions` — post welcome embed\n"
-                    "`[p]trs settings` — view current config"
-                ),
-                inline=False,
-            )
-            embed.add_field(
-                name="🛠️ Staff Commands",
-                value=(
-                    "`[p]trs view [id]` — view ticket summary\n"
-                    "`[p]trs status [id] <status>` — update status\n"
-                    "`[p]trs close [id]` — close a ticket\n"
-                    "`[p]trs claim [id]` — assign ticket to you\n"
-                    "`[p]trs reply [id] <msg>` — reply to a ticket\n"
-                    "`[p]trs list [status]` — list tickets\n"
-                    "`[p]trs ping` — test WordPress connection"
-                ),
-                inline=False,
-            )
-            embed.add_field(
-                name="💡 User Command",
-                value="`[p]support` — directs users to the ticket channel",
-                inline=False,
-            )
-            embed.set_footer(text="Run commands inside a ticket thread to skip the ticket ID.")
-            await ctx.send(embed=embed)
+        # Only send the menu when no subcommand was matched.
+        # With invoke_without_command=True this callback always runs,
+        # so we must guard against subcommand invocations.
+        if ctx.invoked_subcommand is not None:
+            return
+        embed = discord.Embed(
+            title="🎫 Trading Ranch Support Help Menu",
+            color=0x1a0a2e,
+        )
+        embed.add_field(
+            name="📋 Setup (Admin)",
+            value=(
+                "`[p]trs setchannel #channel` — where users submit tickets\n"
+                "`[p]trs setnotifychannel #channel` — staff alerts for web tickets\n"
+                "`[p]trs setstaffrole @role` — support staff role\n"
+                "`[p]trs setsecret <key>` — WordPress API secret\n"
+                "`[p]trs seturl <url>` — WordPress site URL\n"
+                "`[p]trs settitle <text>` — change instructions embed title\n"
+                "`[p]trs instructions` — post welcome embed\n"
+                "`[p]trs settings` — view current config"
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="🛠️ Staff Commands",
+            value=(
+                "`[p]trs view [id]` — view ticket summary\n"
+                "`[p]trs status [id] <status>` — update status\n"
+                "`[p]trs close [id]` — close a ticket\n"
+                "`[p]trs claim [id]` — assign ticket to you\n"
+                "`[p]trs reply [id] <msg>` — reply to a ticket\n"
+                "`[p]trs list [status]` — list tickets\n"
+                "`[p]trs ping` — test WordPress connection"
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="💡 User Command",
+            value="`[p]support` — directs users to the ticket channel",
+            inline=False,
+        )
+        embed.set_footer(text="Run commands inside a ticket thread to skip the ticket ID.")
+        await ctx.send(embed=embed)
 
     @trsupport.command(name="setchannel")
     @commands.admin_or_permissions(manage_guild=True)
