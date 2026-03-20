@@ -803,6 +803,11 @@ class BBTRSupport(commands.Cog):
         first_msg = ""
         if replies and isinstance(replies, list) and replies:
             first_msg = replies[0].get("message", "")
+            # Seed the reply watermark so _sync_wp_replies doesn't re-post this.
+            first_reply_id = replies[0].get("id", 0)
+            if first_reply_id:
+                async with self.config.last_reply_ids() as ids:
+                    ids[str(ticket_id)] = first_reply_id
         if first_msg:
             await thread.send(f"**{submitter}** (via website):\n\n{first_msg}")
 
