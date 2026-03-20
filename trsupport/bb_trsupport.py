@@ -166,6 +166,21 @@ class BBTRSupport(commands.Cog):
         async with self.config.ticket_authors() as authors:
             authors[str(ticket_id)] = {"discord_id": discord_id, "wp_linked": wp_linked}
 
+    async def _resolve_ticket_id(
+        self, ctx: commands.Context, ticket_id: int | None
+    ) -> int | None:
+        """Return ticket_id if provided, else auto-detect from the current thread."""
+        if ticket_id is not None:
+            return ticket_id
+        if isinstance(ctx.channel, discord.Thread):
+            tid = await self._ticket_id_for_thread(ctx.channel.id)
+            if tid:
+                return tid
+        await ctx.send(
+            "❌ Provide a ticket ID, or run this command inside a ticket thread."
+        )
+        return None
+
     async def _get_author(self, ticket_id: int) -> dict:
         """Return {discord_id, wp_linked} for a ticket, or try to resolve from WP."""
         authors = await self.config.ticket_authors()
@@ -644,8 +659,11 @@ class BBTRSupport(commands.Cog):
 
     @trsupport.command(name="view")
     @commands.admin_or_permissions(manage_guild=True)
-    async def trs_view(self, ctx: commands.Context, ticket_id: int):
-        """View a ticket summary by ID."""
+    async def trs_view(self, ctx: commands.Context, ticket_id: int = None):
+        """View a ticket summary. Run inside a ticket thread to skip the ID."""
+        ticket_id = await self._resolve_ticket_id(ctx, ticket_id)
+        if ticket_id is None:
+            return
         async with ctx.typing():
             ticket = await self._get(f"/tickets/{ticket_id}")
         if not ticket:
@@ -662,8 +680,21 @@ class BBTRSupport(commands.Cog):
 
     @trsupport.command(name="status")
     @commands.admin_or_permissions(manage_guild=True)
-    async def trs_setstatus(self, ctx: commands.Context, ticket_id: int, new_status: str):
-        """Update a ticket's status.  Valid values: open, pending, resolved, closed."""
+    async def trs_setstatus(self, ctx: commands.Context, ticket_id_or_status: str, new_status: str = None):
+        """Update a ticket's status. Run inside a thread: `$trs status open`.
+        Outside a thread: `$trs status <id> <status>`."""
+        # Allow `$trs status <status>` inside a thread (ticket_id_or_status is the status).
+        if new_status is None:
+            ticket_id = await self._resolve_ticket_id(ctx, None)
+            if ticket_id is None:
+                return
+            new_status = ticket_id_or_status
+        else:
+            try:
+                ticket_id = int(ticket_id_or_status)
+            except ValueError:
+                await ctx.send("Usage: `$trs status <ticket_id> <status>` or run inside a thread: `$trs status <status>`")
+                return
         new_status = new_status.lower()
         if new_status not in STATUSES:
             await ctx.send(f"Invalid status. Choose from: `{'`, `'.join(STATUSES)}`")
@@ -676,8 +707,11 @@ class BBTRSupport(commands.Cog):
 
     @trsupport.command(name="close")
     @commands.admin_or_permissions(manage_guild=True)
-    async def trs_close(self, ctx: commands.Context, ticket_id: int):
-        """Close a ticket."""
+    async def trs_close(self, ctx: commands.Context, ticket_id: int = None):
+        """Close a ticket. Run inside a ticket thread to skip the ID."""
+        ticket_id = await self._resolve_ticket_id(ctx, ticket_id)
+        if ticket_id is None:
+            return
         result, code = await self._patch(f"/tickets/{ticket_id}", {"status": "closed"})
         if code == 200:
             await ctx.send(f"✅ Ticket #{ticket_id} has been closed.")
@@ -686,8 +720,11 @@ class BBTRSupport(commands.Cog):
 
     @trsupport.command(name="claim")
     @commands.admin_or_permissions(manage_guild=True)
-    async def trs_claim(self, ctx: commands.Context, ticket_id: int):
-        """Claim a ticket — assigns it to your linked WordPress account."""
+    async def trs_claim(self, ctx: commands.Context, ticket_id: int = None):
+        """Claim a ticket. Run inside a ticket thread to skip the ID."""
+        ticket_id = await self._resolve_ticket_id(ctx, ticket_id)
+        if ticket_id is None:
+            return
         wp_info = await self._wp_user_for(str(ctx.author.id))
         if not wp_info["user_id"]:
             await ctx.send(
@@ -708,8 +745,21 @@ class BBTRSupport(commands.Cog):
 
     @trsupport.command(name="reply")
     @commands.admin_or_permissions(manage_guild=True)
-    async def trs_reply(self, ctx: commands.Context, ticket_id: int, *, message: str):
-        """Reply to a ticket directly (without needing to be in its thread)."""
+    async def trs_reply(self, ctx: commands.Context, ticket_id_or_msg: str, *, message: str = None):
+        """Reply to a ticket. Run inside a thread: `$trs reply <message>`.
+        Outside a thread: `$trs reply <id> <message>`."""
+        # Allow `$trs reply <message>` inside a thread.
+        if message is None:
+            ticket_id = await self._resolve_ticket_id(ctx, None)
+            if ticket_id is None:
+                return
+            message = ticket_id_or_msg
+        else:
+            try:
+                ticket_id = int(ticket_id_or_msg)
+            except ValueError:
+                await ctx.send("Usage: `$trs reply <ticket_id> <message>` or run inside a thread: `$trs reply <message>`")
+                return
         wp_info    = await self._wp_user_for(str(ctx.author.id))
         wp_user_id = wp_info["user_id"]
         is_staff   = await self._is_staff(ctx.author)
