@@ -615,7 +615,7 @@ class BBTRSupport(commands.Cog):
                 "**How it works:**\n"
                 "1️⃣ Describe your issue in a message below\n"
                 "2️⃣ Your message is removed and a **private thread** is created\n"
-                "3️⃣ Pick a topic, then chat directly with our support team\n\n"
+                "3️⃣ Our support team will be in touch in your private ticket thread\n\n"
                 "Only **you** and the support team can see your thread.\n\n"
                 "You can also open a ticket on our website at "
                 "[bullbarbie.com](https://bullbarbie.com)."
