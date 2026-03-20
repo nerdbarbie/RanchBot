@@ -710,9 +710,14 @@ class BBTRSupport(commands.Cog):
     @trsupport.command(name="setchannel")
     @commands.admin_or_permissions(manage_guild=True)
     async def trs_setchannel(self, ctx: commands.Context, channel: discord.TextChannel):
-        """Set the channel where users submit tickets (messages auto-create threads)."""
+        """Set the public channel where users type to open a support ticket.
+        Any message sent there is deleted and a private thread is created automatically."""
         await self.config.channel_id.set(channel.id)
-        await ctx.send(f"✅ Notification channel set to {channel.mention}.")
+        await ctx.send(
+            f"✅ Ticket submission channel set to {channel.mention}. "
+            f"Users who type there will have their message removed and a private ticket thread created.\n"
+            f"Run `[p]trsupport instructions` to post the welcome embed in that channel."
+        )
 
     @trsupport.command(name="setsecret")
     @commands.admin_or_permissions(manage_guild=True)
