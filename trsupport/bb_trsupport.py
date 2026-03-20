@@ -709,7 +709,7 @@ class BBTRSupport(commands.Cog):
 
     # ── Admin / staff commands ────────────────────────────────────────────────
 
-    @commands.group(name="trsupport", aliases=["trs"])
+    @commands.group(name="trsupport", aliases=["trs"], invoke_without_command=True)
     @commands.guild_only()
     async def trsupport(self, ctx: commands.Context):
         """Trading Ranch Support Help Menu"""
