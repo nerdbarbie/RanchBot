@@ -780,32 +780,31 @@ class BBTRSupport(commands.Cog):
 
     # ── setinstructions group ─────────────────────────────────────────────────
 
-    @trsupport.group(name="setinstructions")
+    @trsupport.command(name="settitle")
     @commands.admin_or_permissions(manage_guild=True)
-    async def trs_setinstructions(self, ctx: commands.Context):
-        """Edit the instructions embed that is posted in the support channel."""
-
-    @trs_setinstructions.command(name="title")
     async def trs_instr_title(self, ctx: commands.Context, *, text: str):
-        """Set the embed title (e.g. 🎫 Trading Ranch Support)."""
+        """Set the instructions embed title."""
         await self.config.instr_title.set(text)
-        await ctx.send(f"✅ Instructions title updated.")
+        await ctx.send("✅ Instructions title updated.")
 
-    @trs_setinstructions.command(name="description")
+    @trsupport.command(name="setdescription")
+    @commands.admin_or_permissions(manage_guild=True)
     async def trs_instr_description(self, ctx: commands.Context, *, text: str):
-        """Set the embed description. Use \\n for line breaks."""
+        """Set the instructions embed description. Use \\n for line breaks."""
         await self.config.instr_description.set(text.replace("\\n", "\n"))
-        await ctx.send(f"✅ Instructions description updated.")
+        await ctx.send("✅ Instructions description updated.")
 
-    @trs_setinstructions.command(name="footer")
+    @trsupport.command(name="setfooter")
+    @commands.admin_or_permissions(manage_guild=True)
     async def trs_instr_footer(self, ctx: commands.Context, *, text: str):
-        """Set the embed footer text."""
+        """Set the instructions embed footer text."""
         await self.config.instr_footer.set(text)
-        await ctx.send(f"✅ Instructions footer updated.")
+        await ctx.send("✅ Instructions footer updated.")
 
-    @trs_setinstructions.command(name="color")
+    @trsupport.command(name="setcolor")
+    @commands.admin_or_permissions(manage_guild=True)
     async def trs_instr_color(self, ctx: commands.Context, hex_color: str):
-        """Set the embed color as a hex value (e.g. 1a0a2e or #1a0a2e)."""
+        """Set the instructions embed color as a hex value (e.g. 1a0a2e or #1a0a2e)."""
         hex_color = hex_color.lstrip("#")
         try:
             color_int = int(hex_color, 16)
@@ -813,7 +812,7 @@ class BBTRSupport(commands.Cog):
             await ctx.send("❌ Invalid hex color. Example: `1a0a2e` or `#1a0a2e`.")
             return
         await self.config.instr_color.set(color_int)
-        await ctx.send(f"✅ Instructions color updated to `#{hex_color.upper()}`.")    
+        await ctx.send(f"✅ Instructions color updated to `#{hex_color.upper()}`.")
 
     @trsupport.command(name="ping")
     @commands.admin_or_permissions(manage_guild=True)
