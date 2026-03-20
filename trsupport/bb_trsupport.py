@@ -277,6 +277,157 @@ class TicketView(discord.ui.View):
         return ticket_id, thread_id
 
 
+# ── "Open a Ticket" button + modal for the instructions embed ─────────────────
+
+
+class TicketCreateModal(discord.ui.Modal, title="Open a Support Ticket"):
+    """Modal that pops up when a user clicks the Open a Ticket button."""
+
+    description = discord.ui.TextInput(
+        label="Describe your issue",
+        style=discord.TextStyle.paragraph,
+        placeholder="Tell us what you need help with (at least a sentence)…",
+        min_length=10,
+        max_length=2000,
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        cog = interaction.client.get_cog("BBTRSupport")
+        if not cog:
+            await interaction.response.send_message("❌ Support system not loaded.", ephemeral=True)
+            return
+
+        author     = interaction.user
+        discord_id = str(author.id)
+        content    = self.description.value.strip()
+
+        # Prevent duplicate tickets from rapid clicks.
+        if author.id in cog._creating_ticket:
+            await interaction.response.send_message(
+                "⏳ Your ticket is already being created, please wait…", ephemeral=True
+            )
+            return
+        cog._creating_ticket.add(author.id)
+
+        # Defer so we have time to hit the WP API + create a thread.
+        await interaction.response.defer(ephemeral=True)
+
+        try:
+            wp_info    = await cog._wp_user_for(discord_id)
+            wp_user_id = wp_info["user_id"]
+            user_email = wp_info["email"]
+
+            result, status_code = await cog._post("/tickets", {
+                "topic":            "general",
+                "message":          content,
+                "name":             author.display_name,
+                "email":            user_email,
+                "source":           "discord",
+                "discord_user_id":  discord_id,
+                "discord_username": str(author),
+                "wp_user_id":       wp_user_id,
+            })
+
+            if status_code not in (200, 201) or not result.get("success"):
+                await interaction.followup.send(
+                    "❌ Failed to create a ticket. Please try again or contact staff directly.",
+                    ephemeral=True,
+                )
+                return
+
+            ticket    = result.get("ticket", {})
+            ticket_id = result.get("ticket_id")
+            if not ticket_id:
+                await interaction.followup.send(
+                    "❌ Ticket submitted but no ID returned. Please contact staff.",
+                    ephemeral=True,
+                )
+                return
+
+            # Create the private thread.
+            channel = interaction.channel
+            try:
+                thread = await channel.create_thread(
+                    name=f"Ticket #{ticket_id} — {author.display_name}",
+                    type=discord.ChannelType.private_thread,
+                    auto_archive_duration=10080,
+                )
+            except (discord.Forbidden, discord.HTTPException) as exc:
+                await interaction.followup.send(
+                    f"❌ Thread creation failed: {exc}", ephemeral=True
+                )
+                return
+
+            try:
+                await thread.add_user(author)
+            except discord.HTTPException:
+                pass
+
+            await cog._register_thread(thread.id, ticket_id)
+            await cog._register_author(ticket_id, discord_id, bool(wp_user_id))
+            await cog._patch(f"/tickets/{ticket_id}", {"discord_thread_id": str(thread.id)})
+
+            # Post embed + user message inside the thread.
+            embed = cog._ticket_embed(ticket, prefix="🆕 New Ticket")
+            embed.add_field(name="From", value=f"{author.mention} ({author})", inline=False)
+            if wp_user_id:
+                wp_display = wp_info.get("display_name") or str(wp_user_id)
+                embed.add_field(name="Web Account", value=wp_display, inline=True)
+            embed_msg = await thread.send(embed=embed)
+            await thread.send(f"**{author.display_name}:**\n\n{content}")
+            await thread.send(
+                f"Thanks for reaching out, {author.mention}! A support team member "
+                f"will be with you shortly."
+            )
+
+            # Notification with buttons.
+            await cog._post_ticket_notification(
+                ticket, thread,
+                source_label="🆕 New Ticket",
+                submitter=f"{author.mention} ({author})",
+                guild=interaction.guild,
+            )
+
+            # Topic selection via emoji reactions.
+            topic_msg = await thread.send(cog._topic_reaction_menu())
+            for emoji in cog._TOPIC_EMOJIS:
+                try:
+                    await topic_msg.add_reaction(emoji)
+                except discord.HTTPException:
+                    pass
+            cog._topic_select[topic_msg.id] = {
+                "ticket_id":    ticket_id,
+                "thread_id":    thread.id,
+                "author_id":    author.id,
+                "embed_msg_id": embed_msg.id,
+            }
+
+            # Ephemeral confirmation — only the user sees this.
+            await interaction.followup.send(
+                f"🎫 Your support ticket **#{ticket_id}** has been created! "
+                f"Continue in {thread.mention}.",
+                ephemeral=True,
+            )
+        finally:
+            cog._creating_ticket.discard(author.id)
+
+
+class TicketCreateView(discord.ui.View):
+    """Persistent view attached to the instructions embed in the support channel."""
+
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(
+        label="Open a Ticket",
+        style=discord.ButtonStyle.primary,
+        custom_id="trs:open_ticket",
+        emoji="🎫",
+    )
+    async def btn_open_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(TicketCreateModal())
+
+
 class BBTRSupport(commands.Cog):
     """Trading Ranch WordPress support ticket bridge."""
 
@@ -321,8 +472,9 @@ class BBTRSupport(commands.Cog):
     async def cog_load(self):
         self.session = aiohttp.ClientSession()
         self._sync_task = asyncio.create_task(self._sync_loop())
-        # Register the persistent button view so it works after restarts.
+        # Register persistent button views so they work after restarts.
         self.bot.add_view(TicketView(cog=self))
+        self.bot.add_view(TicketCreateView())
 
     async def cog_unload(self):
         if self._sync_task:
@@ -644,7 +796,7 @@ class BBTRSupport(commands.Cog):
             embed.add_field(
                 name="Web Account", value=wp_name or f"User #{wp_uid}", inline=True,
             )
-        await thread.send(embed=embed)
+        embed_msg = await thread.send(embed=embed)
 
         # Post the ticket message content (fetched from the first reply).
         replies = await self._get(f"/tickets/{ticket_id}/replies")
@@ -661,6 +813,21 @@ class BBTRSupport(commands.Cog):
             submitter=submitter,
             guild=support_channel.guild,
         )
+
+        # Topic selection via emoji reactions (staff or linked author can pick).
+        topic_msg = await thread.send(self._topic_reaction_menu())
+        for emoji in self._TOPIC_EMOJIS:
+            try:
+                await topic_msg.add_reaction(emoji)
+            except discord.HTTPException:
+                pass
+        discord_user_id_raw = ticket.get("discord_user_id", "")
+        self._topic_select[topic_msg.id] = {
+            "ticket_id":    ticket_id,
+            "thread_id":    thread.id,
+            "author_id":    int(discord_user_id_raw) if discord_user_id_raw else 0,
+            "embed_msg_id": embed_msg.id,
+        }
 
         # If the web user has a linked Discord account, invite them too.
         discord_user_id = ticket.get("discord_user_id")
@@ -884,8 +1051,12 @@ class BBTRSupport(commands.Cog):
         entry = self._topic_select.get(payload.message_id)
         if not entry:
             return
+        # Allow the ticket author OR any staff member to select the topic.
         if payload.user_id != entry["author_id"]:
-            return  # only the ticket author may select the topic
+            guild = self.bot.get_guild(payload.guild_id) if payload.guild_id else None
+            member = guild.get_member(payload.user_id) if guild else None
+            if not member or not await self._is_staff(member):
+                return
         emoji = str(payload.emoji)
         try:
             idx = self._TOPIC_EMOJIS.index(emoji)
@@ -1241,10 +1412,10 @@ class BBTRSupport(commands.Cog):
 
     _DEFAULT_INSTR_TITLE       = "🎫 Trading Ranch Support"
     _DEFAULT_INSTR_DESCRIPTION = (
-        "Need help? Just type your message here and a private support ticket "
-        "will be created for you.\n\n"
+        "Need help? Click the **Open a Ticket** button below and describe "
+        "your issue. A private support ticket thread will be created for you.\n\n"
         "How it works:\n"
-        "1️⃣ Describe your issue in a message below\n"
+        "1️⃣ Click the button and describe your issue\n"
         "2️⃣ A private ticket thread is created\n"
         "3️⃣ Chat directly with our staff privately\n\n"
         "Only you and the support team can see your thread. "
@@ -1275,7 +1446,7 @@ class BBTRSupport(commands.Cog):
             color=self._DEFAULT_INSTR_COLOR,
         )
         embed.set_footer(text=self._DEFAULT_INSTR_FOOTER)
-        await channel.send(embed=embed)
+        await channel.send(embed=embed, view=TicketCreateView())
         if ctx.channel.id != channel_id:
             await ctx.send(f"✅ Instructions posted in {channel.mention}.")
 
