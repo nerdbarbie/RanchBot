@@ -12,7 +12,13 @@ Commands:
   !trsupport setsecret <key>       — set WordPress API secret         (admin)
   !trsupport seturl <url>          — set WordPress site URL           (admin)
   !trsupport setstaffrole @role    — set support staff role           (admin)
-  !trsupport instructions          — post welcome embed in channel    (admin)
+  !trsupport instructions                       — post welcome embed in channel    (admin)
+  !trsupport setinstructions title <text>       — edit embed title                 (admin)
+  !trsupport setinstructions description <text> — edit embed description            (admin)
+  !trsupport setinstructions footer <text>      — edit embed footer                 (admin)
+  !trsupport setinstructions color <hex>        — edit embed color (e.g. 1a0a2e)   (admin)
+  !trsupport setchannel #channel               — set support ticket channel        (admin)
+  !trsupport setnotifychannel #channel         — set staff log/alert channel       (admin)
   !trsupport status <id> <status>  — update a ticket's status        (staff)
   !trsupport view <id>             — view a ticket summary            (staff)
   !trsupport close <id>            — close a ticket                   (staff)
@@ -75,8 +81,30 @@ class BBTRSupport(commands.Cog):
             ticket_threads  = {},     # str(thread_id) -> int(wp_ticket_id)
             last_reply_ids  = {},     # str(wp_ticket_id) -> int(last_synced_reply_id)
             ticket_authors  = {},     # str(wp_ticket_id) -> {"discord_id": str, "wp_linked": bool}
+            # Instructions embed customisation
+            instr_title       = "🎫 Trading Ranch Support",
+            instr_description = (
+                "Need help? Just type your message here and a private support ticket "
+                "will be created for you.\n\n"
+                "**How it works:**\n"
+                "1️⃣ Describe your issue in a message below\n"
+                "2️⃣ A private ticket thread is created\n"
+                "3️⃣ Chat directly with our staff privately\n\n"
+                "Only **you** and the support team can see your thread. "
+                "Include details and screenshots when applicable.\n\n"
+                "Support tickets can also be opened on our website at "
+                "[bullbarbie.com](https://bullbarbie.com), but please do not submit "
+                "duplicate tickets as this slows us down."
+            ),
+            instr_footer      = "Trading Ranch Support System",
+            instr_color       = 0x1a0a2e,
+            # Staff notification / log channel
+            notify_channel_id       = None,   # separate channel for staff alerts
+            last_notified_ticket_id = 0,      # highest web-ticket ID already alerted
         )
         self._creating_ticket: set = set()   # user IDs currently in ticket creation
+        # In-memory: message_id → topic-selection context (reset on reload)
+        self._topic_select: dict = {}
 
     async def cog_load(self):
         self.session = aiohttp.ClientSession()
@@ -218,10 +246,11 @@ class BBTRSupport(commands.Cog):
     _TOPIC_EMOJIS = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣"]
 
     def _topic_reaction_menu(self) -> str:
-        return "\n".join(
-            f"{self._TOPIC_EMOJIS[i]} — {label}"
+        parts = [
+            f"{self._TOPIC_EMOJIS[i]} {label.split()[0]}"
             for i, (_, label) in enumerate(TOPICS)
-        )
+        ]
+        return "React below to select a topic (Optional):\n" + " | ".join(parts)
 
     def _ticket_embed(self, ticket: dict, prefix: str = "🎫 Ticket") -> discord.Embed:
         status = ticket.get("status", "open")
@@ -231,10 +260,6 @@ class BBTRSupport(commands.Cog):
         )
         embed.add_field(name="Status", value=status.capitalize(), inline=True)
         embed.add_field(name="Topic",  value=ticket.get("topic", "—").replace("_", " ").title(), inline=True)
-        source = ticket.get("source", "web")
-        embed.add_field(name="Source", value=source.capitalize(), inline=True)
-        assigned = ticket.get("assigned_to", 0)
-        embed.add_field(name="Assigned", value=f"User #{assigned}" if assigned else "Unassigned", inline=True)
         embed.set_footer(text="Trading Ranch Support · Reply in this thread to respond")
         return embed
 
@@ -379,9 +404,9 @@ class BBTRSupport(commands.Cog):
             embed.add_field(name="From", value=f"{author.mention} ({author})", inline=False)
             if wp_user_id:
                 embed.add_field(
-                    name="WP Account", value=f"Linked (ID {wp_user_id})", inline=True,
+                    name="Web Account", value=f"Linked (ID {wp_user_id})", inline=True,
                 )
-            await thread.send(embed=embed)
+            embed_msg = await thread.send(embed=embed)
             await thread.send(f"**{author.display_name}:**\n\n{content}")
 
             # Welcome message — topic is fixed to "general".
@@ -395,6 +420,23 @@ class BBTRSupport(commands.Cog):
             if staff_role_id:
                 await thread.send(f"<@&{staff_role_id}>")
 
+            # Topic selection via emoji reactions.
+            topic_msg = await thread.send(self._topic_reaction_menu())
+            for emoji in self._TOPIC_EMOJIS:
+                try:
+                    await topic_msg.add_reaction(emoji)
+                except discord.HTTPException:
+                    pass
+            self._topic_select[topic_msg.id] = {
+                "ticket_id":      ticket_id,
+                "thread_id":      thread.id,
+                "author_id":      author.id,
+                "embed_msg_id":   embed_msg.id,
+                "author_mention": author.mention,
+                "author_str":     str(author),
+                "wp_user_id":     wp_user_id,
+            }
+
             # Auto-deleting confirmation in the support channel.
             try:
                 await message.channel.send(
@@ -407,6 +449,58 @@ class BBTRSupport(commands.Cog):
 
         finally:
             self._creating_ticket.discard(author.id)
+
+    # ── on_raw_reaction_add — topic selection ───────────────────────────────
+
+    @commands.Cog.listener()
+    async def on_raw_reaction_add(self, payload: discord.RawReactionActionEvent):
+        """Handle emoji reactions for topic selection on new-ticket messages."""
+        if payload.user_id == self.bot.user.id:
+            return
+        entry = self._topic_select.get(payload.message_id)
+        if not entry:
+            return
+        if payload.user_id != entry["author_id"]:
+            return  # only the ticket author may select the topic
+        emoji = str(payload.emoji)
+        try:
+            idx = self._TOPIC_EMOJIS.index(emoji)
+        except ValueError:
+            return
+        slug, label = TOPICS[idx]
+        result, code = await self._patch(f"/tickets/{entry['ticket_id']}", {"topic": slug})
+        if code != 200:
+            return
+        # Consume the entry so double-reacts are ignored.
+        del self._topic_select[payload.message_id]
+        thread = self.bot.get_channel(entry["thread_id"])
+        if not thread or not isinstance(thread, discord.Thread):
+            return
+        # Edit the react-menu message to confirm selection.
+        try:
+            topic_msg = await thread.fetch_message(payload.message_id)
+            await topic_msg.edit(content=f"✅ Topic set to **{label}**.")
+            await topic_msg.clear_reactions()
+        except (discord.Forbidden, discord.HTTPException):
+            pass
+        # Update the ticket embed to reflect the new topic.
+        try:
+            embed_msg = await thread.fetch_message(entry["embed_msg_id"])
+            old = embed_msg.embeds[0] if embed_msg.embeds else None
+            if old:
+                updated = discord.Embed(
+                    title=old.title,
+                    color=old.color,
+                    description=old.description,
+                )
+                for field in old.fields:
+                    val = label.replace("_", " ").title() if field.name == "Topic" else field.value
+                    updated.add_field(name=field.name, value=val, inline=field.inline)
+                if old.footer:
+                    updated.set_footer(text=old.footer.text)
+                await embed_msg.edit(embed=updated)
+        except (discord.Forbidden, discord.HTTPException):
+            pass
 
     # ── on_message — support channel + thread relay ──────────────────────────
 
@@ -493,11 +587,49 @@ class BBTRSupport(commands.Cog):
         while True:
             try:
                 await self._sync_wp_replies()
+                await self._check_new_web_tickets()
             except asyncio.CancelledError:
                 return
             except Exception:
                 log.exception("Error in WP→Discord sync loop")
             await asyncio.sleep(SYNC_INTERVAL)
+
+    async def _check_new_web_tickets(self):
+        """Alert the notify channel when a new ticket is submitted via the website."""
+        notify_id = await self.config.notify_channel_id()
+        if not notify_id:
+            return
+        notify_channel = self.bot.get_channel(notify_id)
+        if not notify_channel:
+            return
+        secret = await self.config.api_secret()
+        if not secret:
+            return
+        tickets = await self._get("/tickets")
+        if not tickets or not isinstance(tickets, list):
+            return
+        last_id = await self.config.last_notified_ticket_id()
+        # Only alert on web-origin tickets we haven't seen yet.
+        new_tickets = [
+            t for t in tickets
+            if t.get("id", 0) > last_id and t.get("source", "web") != "discord"
+        ]
+        if not new_tickets:
+            return
+        new_tickets.sort(key=lambda t: t.get("id", 0))
+        staff_role_id = await self.config.staff_role_id()
+        for ticket in new_tickets:
+            embed = self._ticket_embed(ticket, prefix="🌐 New Web Ticket")
+            if ticket.get("guest_email"):
+                embed.add_field(name="Guest Email", value=ticket["guest_email"], inline=True)
+            content = f"<@&{staff_role_id}>" if staff_role_id else None
+            try:
+                await notify_channel.send(content=content, embed=embed)
+            except (discord.Forbidden, discord.HTTPException):
+                log.warning("Could not post web ticket alert to notify channel %s", notify_id)
+        max_id = max(t.get("id", 0) for t in new_tickets)
+        if max_id > last_id:
+            await self.config.last_notified_ticket_id.set(max_id)
 
     async def _sync_wp_replies(self):
         """Check all tracked ticket threads for new web-originated replies."""
@@ -548,7 +680,7 @@ class BBTRSupport(commands.Cog):
                     continue
 
                 # Build the reply message.
-                reply_text = f"🌐 **{author_name}** (via website):\n\n{msg_text}"
+                reply_text = f"🌐 **TradingRanchSupport** (bullbarbie.com):\n\n{msg_text}"
 
                 # Mention discord-only users so they get a notification.
                 # Linked WP users get email via WP — no need to ping.
@@ -578,7 +710,7 @@ class BBTRSupport(commands.Cog):
     @trsupport.command(name="setchannel")
     @commands.admin_or_permissions(manage_guild=True)
     async def trs_setchannel(self, ctx: commands.Context, channel: discord.TextChannel):
-        """Set the channel where new ticket notifications are posted."""
+        """Set the channel where users submit tickets (messages auto-create threads)."""
         await self.config.channel_id.set(channel.id)
         await ctx.send(f"✅ Notification channel set to {channel.mention}.")
 
@@ -610,6 +742,16 @@ class BBTRSupport(commands.Cog):
         await self.config.staff_role_id.set(role.id)
         await ctx.send(f"✅ Staff role set to **{role.name}**.")
 
+    @trsupport.command(name="setnotifychannel")
+    @commands.admin_or_permissions(manage_guild=True)
+    async def trs_setnotifychannel(self, ctx: commands.Context, channel: discord.TextChannel):
+        """Set a staff log/alert channel for web ticket notifications and @staff pings."""
+        await self.config.notify_channel_id.set(channel.id)
+        await ctx.send(
+            f"✅ Notify channel set to {channel.mention}. "
+            f"Staff will be pinged here whenever a ticket is submitted from the website."
+        )
+
     @trsupport.command(name="instructions")
     @commands.admin_or_permissions(manage_guild=True)
     async def trs_instructions(self, ctx: commands.Context):
@@ -622,25 +764,52 @@ class BBTRSupport(commands.Cog):
         if not channel:
             await ctx.send("❌ Could not find the configured support channel.")
             return
-        embed = discord.Embed(
-            title="🎫 Trading Ranch Support",
-            description=(
-                "Need help? Just **type your issue in this channel** and a private "
-                "support ticket will be created for you automatically.\n\n"
-                "**How it works:**\n"
-                "1️⃣ Describe your issue in a message below\n"
-                "2️⃣ Your message is removed and a **private thread** is created\n"
-                "3️⃣ Our support team will be in touch in your private ticket thread\n\n"
-                "Only **you** and the support team can see your thread.\n\n"
-                "You can also open a ticket on our website at "
-                "[bullbarbie.com](https://bullbarbie.com)."
-            ),
-            color=0x1a0a2e,
-        )
-        embed.set_footer(text="Trading Ranch Support System")
+        title       = await self.config.instr_title()
+        description = await self.config.instr_description()
+        footer      = await self.config.instr_footer()
+        color       = await self.config.instr_color()
+        embed = discord.Embed(title=title, description=description, color=color)
+        embed.set_footer(text=footer)
         await channel.send(embed=embed)
         if ctx.channel.id != channel_id:
             await ctx.send(f"✅ Instructions posted in {channel.mention}.")
+
+    # ── setinstructions group ─────────────────────────────────────────────────
+
+    @trsupport.group(name="setinstructions")
+    @commands.admin_or_permissions(manage_guild=True)
+    async def trs_setinstructions(self, ctx: commands.Context):
+        """Edit the instructions embed that is posted in the support channel."""
+
+    @trs_setinstructions.command(name="title")
+    async def trs_instr_title(self, ctx: commands.Context, *, text: str):
+        """Set the embed title (e.g. 🎫 Trading Ranch Support)."""
+        await self.config.instr_title.set(text)
+        await ctx.send(f"✅ Instructions title updated.")
+
+    @trs_setinstructions.command(name="description")
+    async def trs_instr_description(self, ctx: commands.Context, *, text: str):
+        """Set the embed description. Use \\n for line breaks."""
+        await self.config.instr_description.set(text.replace("\\n", "\n"))
+        await ctx.send(f"✅ Instructions description updated.")
+
+    @trs_setinstructions.command(name="footer")
+    async def trs_instr_footer(self, ctx: commands.Context, *, text: str):
+        """Set the embed footer text."""
+        await self.config.instr_footer.set(text)
+        await ctx.send(f"✅ Instructions footer updated.")
+
+    @trs_setinstructions.command(name="color")
+    async def trs_instr_color(self, ctx: commands.Context, hex_color: str):
+        """Set the embed color as a hex value (e.g. 1a0a2e or #1a0a2e)."""
+        hex_color = hex_color.lstrip("#")
+        try:
+            color_int = int(hex_color, 16)
+        except ValueError:
+            await ctx.send("❌ Invalid hex color. Example: `1a0a2e` or `#1a0a2e`.")
+            return
+        await self.config.instr_color.set(color_int)
+        await ctx.send(f"✅ Instructions color updated to `#{hex_color.upper()}`.")    
 
     @trsupport.command(name="ping")
     @commands.admin_or_permissions(manage_guild=True)
@@ -860,11 +1029,15 @@ class BBTRSupport(commands.Cog):
         staff_role = ctx.guild.get_role(staff_role_id) if staff_role_id and ctx.guild else None
         threads    = await self.config.ticket_threads()
 
+        notify_channel_id = await self.config.notify_channel_id()
+        notify_channel    = ctx.guild.get_channel(notify_channel_id) if notify_channel_id and ctx.guild else None
+
         embed = discord.Embed(title="BB TR Support — Settings", color=0x1a0a2e)
-        embed.add_field(name="WordPress URL",  value=f"`{wp_url}`",                                inline=False)
-        embed.add_field(name="API Secret",     value="✅ Set" if api_secret else "❌ Not set",     inline=True)
-        embed.add_field(name="Notif. Channel", value=channel.mention if channel else "❌ Not set", inline=True)
-        embed.add_field(name="Staff Role",     value=staff_role.mention if staff_role else "❌ Not set", inline=True)
-        embed.add_field(name="Active Threads", value=str(len(threads)),                            inline=True)
-        embed.add_field(name="WP Sync",        value=f"Every {SYNC_INTERVAL}s",                    inline=True)
+        embed.add_field(name="WordPress URL",    value=f"`{wp_url}`",                                      inline=False)
+        embed.add_field(name="API Secret",       value="✅ Set" if api_secret else "❌ Not set",           inline=True)
+        embed.add_field(name="Ticket Channel",   value=channel.mention if channel else "❌ Not set",       inline=True)
+        embed.add_field(name="Notify Channel",   value=notify_channel.mention if notify_channel else "❌ Not set", inline=True)
+        embed.add_field(name="Staff Role",       value=staff_role.mention if staff_role else "❌ Not set", inline=True)
+        embed.add_field(name="Active Threads",   value=str(len(threads)),                                  inline=True)
+        embed.add_field(name="WP Sync",          value=f"Every {SYNC_INTERVAL}s",                          inline=True)
         await ctx.send(embed=embed)
