@@ -12,11 +12,8 @@ Commands:
   !trsupport setsecret <key>       — set WordPress API secret         (admin)
   !trsupport seturl <url>          — set WordPress site URL           (admin)
   !trsupport setstaffrole @role    — set support staff role           (admin)
-  !trsupport instructions                       — post welcome embed in channel    (admin)
-  !trsupport settitle <text>                   — edit embed title                 (admin)
-  !trsupport setdescription <text>             — edit embed description            (admin)
-  !trsupport setfooter <text>                  — edit embed footer                 (admin)
-  !trsupport setcolor <hex>                    — edit embed color (e.g. 1a0a2e)   (admin)
+  !trsupport instructions          — post welcome embed in channel    (admin)
+  !trsupport resetinstructions     — reset embed to default text      (admin)
   !trsupport setnotifychannel #channel         — set staff log/alert channel       (admin)
   !trsupport status <id> <status>  — update a ticket's status        (staff)
   !trsupport view <id>             — view a ticket summary            (staff)
@@ -756,6 +753,25 @@ class BBTRSupport(commands.Cog):
             f"Staff will be pinged here whenever a ticket is submitted from the website."
         )
 
+    # ── Default instructions text (source of truth) ──────────────────────────
+
+    _DEFAULT_INSTR_TITLE       = "🎫 Trading Ranch Support"
+    _DEFAULT_INSTR_DESCRIPTION = (
+        "Need help? Just type your message here and a private support ticket "
+        "will be created for you.\n\n"
+        "How it works:\n"
+        "1️⃣ Describe your issue in a message below\n"
+        "2️⃣ A private ticket thread is created\n"
+        "3️⃣ Chat directly with our staff privately\n\n"
+        "Only you and the support team can see your thread. "
+        "Include details and screenshots when applicable.\n\n"
+        "Support tickets can also be opened on our website at "
+        "[bullbarbie.com](https://bullbarbie.com), but please do not submit "
+        "duplicate tickets as this slows us down."
+    )
+    _DEFAULT_INSTR_FOOTER      = "Trading Ranch Support System"
+    _DEFAULT_INSTR_COLOR       = 0x1a0a2e
+
     @trsupport.command(name="instructions")
     @commands.admin_or_permissions(manage_guild=True)
     async def trs_instructions(self, ctx: commands.Context):
@@ -768,51 +784,28 @@ class BBTRSupport(commands.Cog):
         if not channel:
             await ctx.send("❌ Could not find the configured support channel.")
             return
-        title       = await self.config.instr_title()
-        description = await self.config.instr_description()
-        footer      = await self.config.instr_footer()
-        color       = await self.config.instr_color()
+        title       = await self.config.instr_title()       or self._DEFAULT_INSTR_TITLE
+        description = await self.config.instr_description() or self._DEFAULT_INSTR_DESCRIPTION
+        footer      = await self.config.instr_footer()      or self._DEFAULT_INSTR_FOOTER
+        color       = await self.config.instr_color()       or self._DEFAULT_INSTR_COLOR
         embed = discord.Embed(title=title, description=description, color=color)
         embed.set_footer(text=footer)
         await channel.send(embed=embed)
         if ctx.channel.id != channel_id:
             await ctx.send(f"✅ Instructions posted in {channel.mention}.")
 
-    # ── setinstructions group ─────────────────────────────────────────────────
-
-    @trsupport.command(name="settitle")
+    @trsupport.command(name="resetinstructions")
     @commands.admin_or_permissions(manage_guild=True)
-    async def trs_instr_title(self, ctx: commands.Context, *, text: str):
-        """Set the instructions embed title."""
-        await self.config.instr_title.set(text)
-        await ctx.send("✅ Instructions title updated.")
-
-    @trsupport.command(name="setdescription")
-    @commands.admin_or_permissions(manage_guild=True)
-    async def trs_instr_description(self, ctx: commands.Context, *, text: str):
-        """Set the instructions embed description. Use \\n for line breaks."""
-        await self.config.instr_description.set(text.replace("\\n", "\n"))
-        await ctx.send("✅ Instructions description updated.")
-
-    @trsupport.command(name="setfooter")
-    @commands.admin_or_permissions(manage_guild=True)
-    async def trs_instr_footer(self, ctx: commands.Context, *, text: str):
-        """Set the instructions embed footer text."""
-        await self.config.instr_footer.set(text)
-        await ctx.send("✅ Instructions footer updated.")
-
-    @trsupport.command(name="setcolor")
-    @commands.admin_or_permissions(manage_guild=True)
-    async def trs_instr_color(self, ctx: commands.Context, hex_color: str):
-        """Set the instructions embed color as a hex value (e.g. 1a0a2e or #1a0a2e)."""
-        hex_color = hex_color.lstrip("#")
-        try:
-            color_int = int(hex_color, 16)
-        except ValueError:
-            await ctx.send("❌ Invalid hex color. Example: `1a0a2e` or `#1a0a2e`.")
-            return
-        await self.config.instr_color.set(color_int)
-        await ctx.send(f"✅ Instructions color updated to `#{hex_color.upper()}`.")
+    async def trs_resetinstructions(self, ctx: commands.Context):
+        """Reset the instructions embed to the built-in default text."""
+        await self.config.instr_title.set(self._DEFAULT_INSTR_TITLE)
+        await self.config.instr_description.set(self._DEFAULT_INSTR_DESCRIPTION)
+        await self.config.instr_footer.set(self._DEFAULT_INSTR_FOOTER)
+        await self.config.instr_color.set(self._DEFAULT_INSTR_COLOR)
+        await ctx.send(
+            "✅ Instructions reset to defaults. "
+            "Run `[p]trsupport instructions` to post the updated embed."
+        )
 
     @trsupport.command(name="ping")
     @commands.admin_or_permissions(manage_guild=True)
