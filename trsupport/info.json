@@ -2,6 +2,7 @@
     "name": "BBTRSupport",
     "short": "Trading Ranch support ticket bridge for Red-bot",
     "description": "Links Discord to the Trading Ranch WordPress support ticket system via REST API. Anyone in the server can open a ticket, staff reply in threads, everything syncs both ways.",
+    "end_user_data_statement": "This cog stores Discord user IDs and message content to link support tickets between Discord and the WordPress site.",
     "tags": ["support", "tickets", "wordpress", "trading ranch"],
     "install_msg": "After installing, run:\n1. `[p]trsupport setchannel #your-channel`\n2. `[p]trsupport setsecret <key>` (from WP Admin → TR Support → Settings)\n3. `[p]trsupport setstaffrole @YourStaffRole`\n4. `[p]trsupport ping` to verify the connection.",
     "author": ["Trading Ranch"],
