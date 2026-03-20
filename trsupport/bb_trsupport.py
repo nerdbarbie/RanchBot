@@ -7,22 +7,22 @@ thread** is created automatically.  Staff with the configured role (or
 Manage Threads permission) can see every private thread.
 
 Commands:
-  !support                         — points users to the support channel
-  !trsupport setchannel #channel   — set support channel              (admin)
-  !trsupport setsecret <key>       — set WordPress API secret         (admin)
-  !trsupport seturl <url>          — set WordPress site URL           (admin)
-  !trsupport setstaffrole @role    — set support staff role           (admin)
-  !trsupport instructions          — post welcome embed in channel    (admin)
-  !trsupport resetinstructions     — reset embed to default text      (admin)
-  !trsupport setnotifychannel #channel         — set staff log/alert channel       (admin)
-  !trsupport status <id> <status>  — update a ticket's status        (staff)
-  !trsupport view <id>             — view a ticket summary            (staff)
-  !trsupport close <id>            — close a ticket                   (staff)
-  !trsupport claim <id>            — claim / assign a ticket to you   (staff)
-  !trsupport reply <id> <msg>      — reply to a ticket directly       (staff)
-  !trsupport list [status]         — list tickets                     (staff)
-  !trsupport ping                  — test connection to WordPress     (staff)
-  !trsupport settings              — show current configuration       (admin)
+  !support                                  — points users to the support channel
+  !trsupport setchannel #channel            — set support channel              (admin)
+  !trsupport setnotifychannel #channel      — set staff alert channel          (admin)
+  !trsupport setstaffrole @role             — set support staff role           (admin)
+  !trsupport setsecret <key>                — set WordPress API secret         (admin)
+  !trsupport seturl <url>                   — set WordPress site URL           (admin)
+  !trsupport settitle <text>                — change instructions embed title  (admin)
+  !trsupport instructions                   — post welcome embed in channel    (admin)
+  !trsupport settings                       — show current configuration       (admin)
+  !trsupport status <id> <status>           — update a ticket's status        (staff)
+  !trsupport view <id>                      — view a ticket summary            (staff)
+  !trsupport close <id>                     — close a ticket                   (staff)
+  !trsupport claim <id>                     — claim / assign a ticket to you   (staff)
+  !trsupport reply <id> <msg>               — reply to a ticket directly       (staff)
+  !trsupport list [status]                  — list tickets                     (staff)
+  !trsupport ping                           — test connection to WordPress     (staff)
 
 Thread relay:
   Any message posted in a ticket thread is forwarded to WordPress as a reply.
