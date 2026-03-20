@@ -721,27 +721,27 @@ class BBTRSupport(commands.Cog):
             embed.add_field(
                 name="📋 Setup (Admin)",
                 value=(
-                    "`[p]trsupport setchannel #channel` — ticket submission channel\n"
-                    "`[p]trsupport setnotifychannel #channel` — staff alert channel\n"
-                    "`[p]trsupport setstaffrole @role` — support staff role\n"
-                    "`[p]trsupport setsecret <key>` — WordPress API secret\n"
-                    "`[p]trsupport seturl <url>` — WordPress site URL\n"
-                    "`[p]trsupport instructions` — post welcome embed\n"
-                    "`[p]trsupport resetinstructions` — reset embed to default\n"
-                    "`[p]trsupport settings` — view current config"
+                    "`[p]trs setchannel #channel` — where users submit tickets\n"
+                    "`[p]trs setnotifychannel #channel` — staff alerts for web tickets\n"
+                    "`[p]trs setstaffrole @role` — support staff role\n"
+                    "`[p]trs setsecret <key>` — WordPress API secret\n"
+                    "`[p]trs seturl <url>` — WordPress site URL\n"
+                    "`[p]trs settitle <text>` — change instructions embed title\n"
+                    "`[p]trs instructions` — post welcome embed\n"
+                    "`[p]trs settings` — view current config"
                 ),
                 inline=False,
             )
             embed.add_field(
                 name="🛠️ Staff Commands",
                 value=(
-                    "`[p]trsupport view [id]` — view ticket summary\n"
-                    "`[p]trsupport status [id] <status>` — update status\n"
-                    "`[p]trsupport close [id]` — close a ticket\n"
-                    "`[p]trsupport claim [id]` — assign ticket to you\n"
-                    "`[p]trsupport reply [id] <msg>` — reply to a ticket\n"
-                    "`[p]trsupport list [status]` — list tickets\n"
-                    "`[p]trsupport ping` — test WordPress connection"
+                    "`[p]trs view [id]` — view ticket summary\n"
+                    "`[p]trs status [id] <status>` — update status\n"
+                    "`[p]trs close [id]` — close a ticket\n"
+                    "`[p]trs claim [id]` — assign ticket to you\n"
+                    "`[p]trs reply [id] <msg>` — reply to a ticket\n"
+                    "`[p]trs list [status]` — list tickets\n"
+                    "`[p]trs ping` — test WordPress connection"
                 ),
                 inline=False,
             )
@@ -834,28 +834,23 @@ class BBTRSupport(commands.Cog):
         if not channel:
             await ctx.send("❌ Could not find the configured support channel.")
             return
-        title       = await self.config.instr_title()       or self._DEFAULT_INSTR_TITLE
-        description = await self.config.instr_description() or self._DEFAULT_INSTR_DESCRIPTION
-        footer      = await self.config.instr_footer()      or self._DEFAULT_INSTR_FOOTER
-        color       = await self.config.instr_color()       or self._DEFAULT_INSTR_COLOR
-        embed = discord.Embed(title=title, description=description, color=color)
-        embed.set_footer(text=footer)
+        title = await self.config.instr_title() or self._DEFAULT_INSTR_TITLE
+        embed = discord.Embed(
+            title=title,
+            description=self._DEFAULT_INSTR_DESCRIPTION,
+            color=self._DEFAULT_INSTR_COLOR,
+        )
+        embed.set_footer(text=self._DEFAULT_INSTR_FOOTER)
         await channel.send(embed=embed)
         if ctx.channel.id != channel_id:
             await ctx.send(f"✅ Instructions posted in {channel.mention}.")
 
-    @trsupport.command(name="resetinstructions")
+    @trsupport.command(name="settitle")
     @commands.admin_or_permissions(manage_guild=True)
-    async def trs_resetinstructions(self, ctx: commands.Context):
-        """Reset the instructions embed to the built-in default text."""
-        await self.config.instr_title.set(self._DEFAULT_INSTR_TITLE)
-        await self.config.instr_description.set(self._DEFAULT_INSTR_DESCRIPTION)
-        await self.config.instr_footer.set(self._DEFAULT_INSTR_FOOTER)
-        await self.config.instr_color.set(self._DEFAULT_INSTR_COLOR)
-        await ctx.send(
-            "✅ Instructions reset to defaults. "
-            "Run `[p]trsupport instructions` to post the updated embed."
-        )
+    async def trs_settitle(self, ctx: commands.Context, *, text: str):
+        """Change the title of the instructions embed."""
+        await self.config.instr_title.set(text)
+        await ctx.send(f"✅ Instructions title set to: {text}\nRun `[p]trs instructions` to re-post.")
 
     @trsupport.command(name="ping")
     @commands.admin_or_permissions(manage_guild=True)
