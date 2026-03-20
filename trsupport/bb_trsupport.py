@@ -288,6 +288,10 @@ class BBTRSupport(commands.Cog):
         content = message.content.strip()
         if len(content) < 10:
             try:
+                await message.delete()
+            except (discord.Forbidden, discord.HTTPException):
+                pass
+            try:
                 await message.channel.send(
                     f"{message.author.mention} Please provide a bit more detail "
                     f"(at least a sentence) so we can help you effectively.",
@@ -605,6 +609,15 @@ class BBTRSupport(commands.Cog):
         if not tickets or not isinstance(tickets, list):
             return
         last_id = await self.config.last_notified_ticket_id()
+
+        # First run: seed the watermark to the current max ticket ID so we
+        # only alert on tickets created *after* setup, not the entire backlog.
+        if last_id == 0:
+            all_ids = [t.get("id", 0) for t in tickets]
+            if all_ids:
+                await self.config.last_notified_ticket_id.set(max(all_ids))
+            return
+
         # Only alert on web-origin tickets we haven't seen yet.
         new_tickets = [
             t for t in tickets
@@ -699,9 +712,46 @@ class BBTRSupport(commands.Cog):
     @commands.group(name="trsupport", aliases=["trs"])
     @commands.guild_only()
     async def trsupport(self, ctx: commands.Context):
-        """Trading Ranch support ticket administration."""
+        """Trading Ranch Support Help Menu"""
         if ctx.invoked_subcommand is None:
-            await ctx.send_help(self.trsupport)
+            embed = discord.Embed(
+                title="🎫 Trading Ranch Support Help Menu",
+                color=0x1a0a2e,
+            )
+            embed.add_field(
+                name="📋 Setup (Admin)",
+                value=(
+                    "`[p]trsupport setchannel #channel` — ticket submission channel\n"
+                    "`[p]trsupport setnotifychannel #channel` — staff alert channel\n"
+                    "`[p]trsupport setstaffrole @role` — support staff role\n"
+                    "`[p]trsupport setsecret <key>` — WordPress API secret\n"
+                    "`[p]trsupport seturl <url>` — WordPress site URL\n"
+                    "`[p]trsupport instructions` — post welcome embed\n"
+                    "`[p]trsupport resetinstructions` — reset embed to default\n"
+                    "`[p]trsupport settings` — view current config"
+                ),
+                inline=False,
+            )
+            embed.add_field(
+                name="🛠️ Staff Commands",
+                value=(
+                    "`[p]trsupport view [id]` — view ticket summary\n"
+                    "`[p]trsupport status [id] <status>` — update status\n"
+                    "`[p]trsupport close [id]` — close a ticket\n"
+                    "`[p]trsupport claim [id]` — assign ticket to you\n"
+                    "`[p]trsupport reply [id] <msg>` — reply to a ticket\n"
+                    "`[p]trsupport list [status]` — list tickets\n"
+                    "`[p]trsupport ping` — test WordPress connection"
+                ),
+                inline=False,
+            )
+            embed.add_field(
+                name="💡 User Command",
+                value="`[p]support` — directs users to the ticket channel",
+                inline=False,
+            )
+            embed.set_footer(text="Run commands inside a ticket thread to skip the ticket ID.")
+            await ctx.send(embed=embed)
 
     @trsupport.command(name="setchannel")
     @commands.admin_or_permissions(manage_guild=True)
