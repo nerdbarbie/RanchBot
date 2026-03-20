@@ -86,11 +86,11 @@ class BBTRSupport(commands.Cog):
             instr_description = (
                 "Need help? Just type your message here and a private support ticket "
                 "will be created for you.\n\n"
-                "**How it works:**\n"
+                "How it works:\n"
                 "1️⃣ Describe your issue in a message below\n"
                 "2️⃣ A private ticket thread is created\n"
                 "3️⃣ Chat directly with our staff privately\n\n"
-                "Only **you** and the support team can see your thread. "
+                "Only you and the support team can see your thread. "
                 "Include details and screenshots when applicable.\n\n"
                 "Support tickets can also be opened on our website at "
                 "[bullbarbie.com](https://bullbarbie.com), but please do not submit "
