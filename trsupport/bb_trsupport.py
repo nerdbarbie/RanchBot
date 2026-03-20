@@ -3,13 +3,13 @@ BB TR Support — Red-bot cog
 Bridges Discord to the Trading Ranch WordPress support ticket system.
 
 Users type in the support channel; their message is deleted and a **private
-thread** is created automatically.  Staff with the configured role (or
-Manage Threads permission) can see every private thread.
+thread** is created automatically.  All members with the configured staff
+role are explicitly added to the thread so they can see it.  Web-originated
+tickets also get a Discord thread created automatically.
 
 Commands:
   !support                                  — points users to the support channel
   !trsupport setchannel #channel            — set support channel              (admin)
-  !trsupport setnotifychannel #channel      — set staff alert channel          (admin)
   !trsupport setstaffrole @role             — set support staff role           (admin)
   !trsupport setsecret <key>                — set WordPress API secret         (admin)
   !trsupport seturl <url>                   — set WordPress site URL           (admin)
@@ -32,6 +32,7 @@ Thread relay:
 
 import asyncio
 import logging
+import re
 import discord
 import aiohttp
 
@@ -236,6 +237,48 @@ class BBTRSupport(commands.Cog):
             }
         return {"user_id": 0, "email": "", "display_name": ""}
 
+    async def _clean_discord_text(self, content: str, guild: discord.Guild) -> str:
+        """Resolve Discord mentions, channels, and roles to plain-text names.
+
+        <@123> / <@!123>  →  @DisplayName
+        <#123>            →  #channel-name
+        <@&123>           →  @RoleName
+        """
+        def _resolve_user(m):
+            uid = int(m.group(1))
+            member = guild.get_member(uid)
+            return f"@{member.display_name}" if member else m.group(0)
+
+        def _resolve_channel(m):
+            cid = int(m.group(1))
+            ch = guild.get_channel(cid)
+            return f"#{ch.name}" if ch else m.group(0)
+
+        def _resolve_role(m):
+            rid = int(m.group(1))
+            role = guild.get_role(rid)
+            return f"@{role.name}" if role else m.group(0)
+
+        content = re.sub(r'<@!?(\d+)>', _resolve_user, content)
+        content = re.sub(r'<#(\d+)>',   _resolve_channel, content)
+        content = re.sub(r'<@&(\d+)>',  _resolve_role, content)
+        return content
+
+    @staticmethod
+    def _collect_image_urls(message: discord.Message) -> list:
+        """Return a list of image URLs from attachments and embeds."""
+        urls = []
+        for att in message.attachments:
+            if att.content_type and att.content_type.startswith("image/"):
+                urls.append(att.url)
+            elif att.filename and att.filename.lower().rsplit(".", 1)[-1] in ("png", "jpg", "jpeg", "gif", "webp"):
+                urls.append(att.url)
+        # Also pick up image embeds auto-generated from pasted URLs.
+        for emb in message.embeds:
+            if emb.type == "image" and emb.url:
+                urls.append(emb.url)
+        return urls
+
     def _topic_menu(self) -> str:
         return "\n".join(f"`{i}` — {label}" for i, (_, label) in enumerate(TOPICS, 1))
 
@@ -258,6 +301,105 @@ class BBTRSupport(commands.Cog):
         embed.add_field(name="Topic",  value=ticket.get("topic", "—").replace("_", " ").title(), inline=True)
         embed.set_footer(text="Trading Ranch Support · Reply in this thread to respond")
         return embed
+
+    async def _invite_staff_to_thread(self, thread: discord.Thread):
+        """Explicitly add every member with the staff role to a private thread."""
+        staff_role_id = await self.config.staff_role_id()
+        if not staff_role_id or not thread.guild:
+            return
+        role = thread.guild.get_role(staff_role_id)
+        if not role:
+            return
+        for member in role.members:
+            try:
+                await thread.add_user(member)
+            except discord.HTTPException:
+                pass
+
+    async def _archive_thread_for_ticket(self, ticket_id: int):
+        """Archive and lock the Discord thread linked to a ticket."""
+        threads = await self.config.ticket_threads()
+        for tid_str, tid in threads.items():
+            if tid == ticket_id:
+                thread = self.bot.get_channel(int(tid_str))
+                if thread and isinstance(thread, discord.Thread):
+                    try:
+                        await thread.edit(archived=True, locked=True)
+                    except (discord.Forbidden, discord.HTTPException):
+                        log.warning("Could not archive thread %s for ticket %s", tid_str, ticket_id)
+                break
+
+    async def _create_thread_for_web_ticket(
+        self, ticket: dict, support_channel: discord.TextChannel
+    ):
+        """Create a private Discord thread for a web-originated ticket."""
+        ticket_id = ticket.get("id")
+        if not ticket_id:
+            return
+
+        # Skip if this ticket already has a Discord thread.
+        if ticket.get("discord_thread_id"):
+            return
+        threads = await self.config.ticket_threads()
+        for _, tid in threads.items():
+            if tid == ticket_id:
+                return
+
+        # Extract submitter name from the ticket title ("Topic - Name").
+        raw_title = ticket.get("title", "")
+        submitter = raw_title.split(" - ", 1)[1] if " - " in raw_title else (ticket.get("discord_username", "") or "Web User")
+        try:
+            thread = await support_channel.create_thread(
+                name=f"Ticket #{ticket_id} — {submitter}",
+                type=discord.ChannelType.private_thread,
+                auto_archive_duration=10080,
+            )
+        except (discord.Forbidden, discord.HTTPException) as exc:
+            log.warning("Could not create thread for web ticket #%s: %s", ticket_id, exc)
+            return
+
+        # Persist the thread <-> ticket mapping.
+        await self._register_thread(thread.id, ticket_id)
+        await self._patch(f"/tickets/{ticket_id}", {"discord_thread_id": str(thread.id)})
+
+        # Post ticket embed.
+        embed = self._ticket_embed(ticket, prefix="\U0001f310 Web Ticket")
+        if ticket.get("guest_email"):
+            embed.add_field(name="Guest Email", value=ticket["guest_email"], inline=True)
+        if ticket.get("wp_user_id"):
+            wp_uid = ticket["wp_user_id"]
+            # Try to get the WP display name via the linked Discord account.
+            discord_uid = ticket.get("discord_user_id", "")
+            wp_name = ""
+            if discord_uid:
+                wp_lookup = await self._wp_user_for(discord_uid)
+                wp_name = wp_lookup.get("display_name", "")
+            embed.add_field(
+                name="Web Account", value=wp_name or f"User #{wp_uid}", inline=True,
+            )
+        await thread.send(embed=embed)
+
+        # Post the ticket message content (fetched from the first reply).
+        replies = await self._get(f"/tickets/{ticket_id}/replies")
+        first_msg = ""
+        if replies and isinstance(replies, list) and replies:
+            first_msg = replies[0].get("message", "")
+        if first_msg:
+            await thread.send(f"**{submitter}** (via website):\n\n{first_msg}")
+
+        # Add staff to the thread.
+        await self._invite_staff_to_thread(thread)
+
+        # If the web user has a linked Discord account, invite them too.
+        discord_user_id = ticket.get("discord_user_id")
+        if discord_user_id:
+            try:
+                member = support_channel.guild.get_member(int(discord_user_id))
+                if member:
+                    await thread.add_user(member)
+                    await self._register_author(ticket_id, discord_user_id, True)
+            except (ValueError, discord.HTTPException):
+                pass
 
     # ── !support — directs users to the support channel ────────────────────
 
@@ -320,6 +462,12 @@ class BBTRSupport(commands.Cog):
             wp_info    = await self._wp_user_for(discord_id)
             wp_user_id = wp_info["user_id"]
             user_email = wp_info["email"]
+
+            # Resolve Discord mentions / channels and attach images.
+            content = await self._clean_discord_text(content, message.guild)
+            image_urls = self._collect_image_urls(message)
+            if image_urls:
+                content += "\n" + "\n".join(image_urls)
 
             # Create the ticket on WordPress (topic defaults to "general").
             result, status_code = await self._post("/tickets", {
@@ -403,8 +551,9 @@ class BBTRSupport(commands.Cog):
             embed = self._ticket_embed(ticket, prefix="🆕 New Ticket")
             embed.add_field(name="From", value=f"{author.mention} ({author})", inline=False)
             if wp_user_id:
+                wp_display = wp_info.get("display_name") or str(wp_user_id)
                 embed.add_field(
-                    name="Web Account", value=f"Linked (ID {wp_user_id})", inline=True,
+                    name="Web Account", value=wp_display, inline=True,
                 )
             embed_msg = await thread.send(embed=embed)
             await thread.send(f"**{author.display_name}:**\n\n{content}")
@@ -415,10 +564,8 @@ class BBTRSupport(commands.Cog):
                 f"will be with you shortly."
             )
 
-            # Notify the staff role inside the thread.
-            staff_role_id = await self.config.staff_role_id()
-            if staff_role_id:
-                await thread.send(f"<@&{staff_role_id}>")
+            # Add all staff-role members to the private thread.
+            await self._invite_staff_to_thread(thread)
 
             # Topic selection via emoji reactions.
             topic_msg = await thread.send(self._topic_reaction_menu())
@@ -548,6 +695,14 @@ class BBTRSupport(commands.Cog):
             is_internal = True
             content     = content[6:].strip()
 
+        # Resolve Discord mentions / channels to readable plain text.
+        content = await self._clean_discord_text(content, message.guild)
+
+        # Append image attachment URLs so they render on the web side.
+        image_urls = self._collect_image_urls(message)
+        if image_urls:
+            content += "\n" + "\n".join(image_urls)
+
         if not content:
             return
 
@@ -571,13 +726,11 @@ class BBTRSupport(commands.Cog):
                 if new_id > current:
                     ids[str(ticket_id)] = new_id
 
-        try:
-            if status_code in (200, 201):
-                await message.add_reaction("✅")
-            else:
+        if status_code not in (200, 201):
+            try:
                 await message.add_reaction("❌")
-        except (discord.Forbidden, discord.HTTPException):
-            pass
+            except (discord.Forbidden, discord.HTTPException):
+                pass
 
     # ── WP → Discord reply sync ──────────────────────────────────────────────
 
@@ -595,15 +748,19 @@ class BBTRSupport(commands.Cog):
             await asyncio.sleep(SYNC_INTERVAL)
 
     async def _check_new_web_tickets(self):
-        """Alert the notify channel when a new ticket is submitted via the website."""
-        notify_id = await self.config.notify_channel_id()
-        if not notify_id:
-            return
-        notify_channel = self.bot.get_channel(notify_id)
-        if not notify_channel:
-            return
+        """Create Discord threads for new web-originated tickets.
+
+        Notification is handled by the WordPress Discord webhook — this
+        method only ensures every web ticket gets a staff-visible thread.
+        """
         secret = await self.config.api_secret()
         if not secret:
+            return
+        channel_id = await self.config.channel_id()
+        if not channel_id:
+            return
+        support_channel = self.bot.get_channel(channel_id)
+        if not support_channel:
             return
         tickets = await self._get("/tickets")
         if not tickets or not isinstance(tickets, list):
@@ -611,14 +768,16 @@ class BBTRSupport(commands.Cog):
         last_id = await self.config.last_notified_ticket_id()
 
         # First run: seed the watermark to the current max ticket ID so we
-        # only alert on tickets created *after* setup, not the entire backlog.
+        # only create threads for tickets submitted *after* setup.
         if last_id == 0:
             all_ids = [t.get("id", 0) for t in tickets]
             if all_ids:
-                await self.config.last_notified_ticket_id.set(max(all_ids))
+                max_seed = max(all_ids)
+                await self.config.last_notified_ticket_id.set(max_seed)
+                log.info("Web-ticket watermark seeded to %s", max_seed)
             return
 
-        # Only alert on web-origin tickets we haven't seen yet.
+        # Only process web-origin tickets we haven't seen yet.
         new_tickets = [
             t for t in tickets
             if t.get("id", 0) > last_id and t.get("source", "web") != "discord"
@@ -626,16 +785,9 @@ class BBTRSupport(commands.Cog):
         if not new_tickets:
             return
         new_tickets.sort(key=lambda t: t.get("id", 0))
-        staff_role_id = await self.config.staff_role_id()
+        log.info("Creating threads for %d new web ticket(s)", len(new_tickets))
         for ticket in new_tickets:
-            embed = self._ticket_embed(ticket, prefix="🌐 New Web Ticket")
-            if ticket.get("guest_email"):
-                embed.add_field(name="Guest Email", value=ticket["guest_email"], inline=True)
-            content = f"<@&{staff_role_id}>" if staff_role_id else None
-            try:
-                await notify_channel.send(content=content, embed=embed)
-            except (discord.Forbidden, discord.HTTPException):
-                log.warning("Could not post web ticket alert to notify channel %s", notify_id)
+            await self._create_thread_for_web_ticket(ticket, support_channel)
         max_id = max(t.get("id", 0) for t in new_tickets)
         if max_id > last_id:
             await self.config.last_notified_ticket_id.set(max_id)
@@ -726,7 +878,6 @@ class BBTRSupport(commands.Cog):
             name="📋 Setup (Admin)",
             value=(
                 "`[p]trs setchannel #channel` — where users submit tickets\n"
-                "`[p]trs setnotifychannel #channel` — staff alerts for web tickets\n"
                 "`[p]trs setstaffrole @role` — support staff role\n"
                 "`[p]trs setsecret <key>` — WordPress API secret\n"
                 "`[p]trs seturl <url>` — WordPress site URL\n"
@@ -741,7 +892,7 @@ class BBTRSupport(commands.Cog):
             value=(
                 "`[p]trs view [id]` — view ticket summary\n"
                 "`[p]trs status [id] <status>` — update status\n"
-                "`[p]trs close [id]` — close a ticket\n"
+                "`[p]trs close [id]` — close ticket & archive thread\n"
                 "`[p]trs claim [id]` — assign ticket to you\n"
                 "`[p]trs reply [id] <msg>` — reply to a ticket\n"
                 "`[p]trs list [status]` — list tickets\n"
@@ -796,16 +947,6 @@ class BBTRSupport(commands.Cog):
         Staff can update ticket statuses and post internal notes in threads."""
         await self.config.staff_role_id.set(role.id)
         await ctx.send(f"✅ Staff role set to **{role.name}**.")
-
-    @trsupport.command(name="setnotifychannel")
-    @commands.admin_or_permissions(manage_guild=True)
-    async def trs_setnotifychannel(self, ctx: commands.Context, channel: discord.TextChannel):
-        """Set a staff log/alert channel for web ticket notifications and @staff pings."""
-        await self.config.notify_channel_id.set(channel.id)
-        await ctx.send(
-            f"✅ Notify channel set to {channel.mention}. "
-            f"Staff will be pinged here whenever a ticket is submitted from the website."
-        )
 
     # ── Default instructions text (source of truth) ──────────────────────────
 
@@ -916,19 +1057,25 @@ class BBTRSupport(commands.Cog):
         result, code = await self._patch(f"/tickets/{ticket_id}", {"status": new_status})
         if code == 200:
             await ctx.send(f"✅ Ticket #{ticket_id} status updated to **{new_status}**.")
+            if new_status in ("closed", "resolved"):
+                await self._archive_thread_for_ticket(ticket_id)
         else:
             await ctx.send(f"❌ Failed to update ticket #{ticket_id}.")
 
     @trsupport.command(name="close")
     @commands.admin_or_permissions(manage_guild=True)
     async def trs_close(self, ctx: commands.Context, ticket_id: int = None):
-        """Close a ticket. Run inside a ticket thread to skip the ID."""
+        """Close a ticket and archive its Discord thread. (Staff only)"""
         ticket_id = await self._resolve_ticket_id(ctx, ticket_id)
         if ticket_id is None:
+            return
+        if not await self._is_staff(ctx.author):
+            await ctx.send("❌ Only support staff can close tickets.")
             return
         result, code = await self._patch(f"/tickets/{ticket_id}", {"status": "closed"})
         if code == 200:
             await ctx.send(f"✅ Ticket #{ticket_id} has been closed.")
+            await self._archive_thread_for_ticket(ticket_id)
         else:
             await ctx.send(f"❌ Could not close ticket #{ticket_id}.")
 
@@ -1074,14 +1221,10 @@ class BBTRSupport(commands.Cog):
         staff_role = ctx.guild.get_role(staff_role_id) if staff_role_id and ctx.guild else None
         threads    = await self.config.ticket_threads()
 
-        notify_channel_id = await self.config.notify_channel_id()
-        notify_channel    = ctx.guild.get_channel(notify_channel_id) if notify_channel_id and ctx.guild else None
-
         embed = discord.Embed(title="BB TR Support — Settings", color=0x1a0a2e)
         embed.add_field(name="WordPress URL",    value=f"`{wp_url}`",                                      inline=False)
         embed.add_field(name="API Secret",       value="✅ Set" if api_secret else "❌ Not set",           inline=True)
         embed.add_field(name="Ticket Channel",   value=channel.mention if channel else "❌ Not set",       inline=True)
-        embed.add_field(name="Notify Channel",   value=notify_channel.mention if notify_channel else "❌ Not set", inline=True)
         embed.add_field(name="Staff Role",       value=staff_role.mention if staff_role else "❌ Not set", inline=True)
         embed.add_field(name="Active Threads",   value=str(len(threads)),                                  inline=True)
         embed.add_field(name="WP Sync",          value=f"Every {SYNC_INTERVAL}s",                          inline=True)
